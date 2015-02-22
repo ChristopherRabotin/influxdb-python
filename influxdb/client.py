@@ -725,11 +725,33 @@ class InfluxDBClient(object):
         """
         Update password
         """
+        return self.alter_database_user(username, new_password)
+
+    def alter_database_user(self, username, password=None, permissions=None):
+        """
+        Alters a database user and/or their permissions.
+
+        :param permissions: A ``(readFrom, writeTo)`` tuple
+        :raise TypeError: if permissions cannot be read.
+        :raise ValueError: if neither password nor permissions provided.
+        """
         url = "db/{0}/users/{1}".format(self._database, username)
 
-        data = {
-            'password': new_password
-        }
+        if not password and not permissions:
+            raise ValueError("Nothing to alter for user {}.".format(username))
+
+        data = {}
+        
+        if password:
+            data['password'] = password
+        
+        if permissions:
+            try:
+                data['readFrom'], data['writeTo'] = permissions
+            except (ValueError, TypeError):
+                raise TypeError(
+                    "'permissions' must be (readFrom, writeTo) tuple"
+                )
 
         self.request(
             url=url,
@@ -739,7 +761,7 @@ class InfluxDBClient(object):
         )
 
         if username == self._username:
-            self._password = new_password
+            self._password = password
 
         return True
 
@@ -756,18 +778,6 @@ class InfluxDBClient(object):
         )
 
         return True
-
-    # update the user by POSTing to db/site_dev/users/paul
-
-    def update_permission(self, username, json_body):
-        """
-        TODO: Update read/write permission
-
-        2013-11-08: This endpoint has not been implemented yet in ver0.0.8,
-        but it is documented in http://influxdb.org/docs/api/http.html.
-        See also: src/api/http/api.go:l57
-        """
-        raise NotImplementedError()
 
     def send_packet(self, packet):
         data = json.dumps(packet)
