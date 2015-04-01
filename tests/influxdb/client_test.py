@@ -605,6 +605,70 @@ class TestInfluxDBClient(unittest.TestCase):
                 {'password': 'laup'}
             )
 
+    def test_alter_database_user_password(self):
+        with requests_mock.Mocker() as m:
+            m.register_uri(
+                requests_mock.POST,
+                "http://localhost:8086/db/db/users/paul"
+            )
+
+            cli = InfluxDBClient(database='db')
+            cli.alter_database_user(
+                username='paul',
+                password='n3wp4ss!'
+            )
+
+            self.assertDictEqual(
+                json.loads(m.last_request.body),
+                {
+                    'password': 'n3wp4ss!'
+                }
+            )
+
+    def test_alter_database_user_permissions(self):
+        with requests_mock.Mocker() as m:
+            m.register_uri(
+                requests_mock.POST,
+                "http://localhost:8086/db/db/users/paul"
+            )
+
+            cli = InfluxDBClient(database='db')
+            cli.alter_database_user(
+                username='paul',
+                permissions=('^$', '.*')
+            )
+
+            self.assertDictEqual(
+                json.loads(m.last_request.body),
+                {
+                    'readFrom': '^$',
+                    'writeTo': '.*'
+                }
+            )
+
+    def test_alter_database_user_password_and_permissions(self):
+        with requests_mock.Mocker() as m:
+            m.register_uri(
+                requests_mock.POST,
+                "http://localhost:8086/db/db/users/paul"
+            )
+
+            cli = InfluxDBClient(database='db')
+            cli.alter_database_user(
+                username='paul',
+                password='n3wp4ss!',
+                permissions=('^$', '.*')
+            )
+
+            self.assertDictEqual(
+                json.loads(m.last_request.body),
+                {
+                    'password': 'n3wp4ss!',
+                    'readFrom': '^$',
+                    'writeTo': '.*'
+                }
+            )
+
     def test_update_database_user_password_current_user(self):
         cli = InfluxDBClient(
             username='root',
