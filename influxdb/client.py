@@ -7,12 +7,19 @@ import json
 import socket
 import requests
 import requests.exceptions
+from sys import version_info
 
+from influxdb.resultset import ResultSet
 
 try:
     xrange
 except NameError:
     xrange = range
+
+if version_info.major == 3:
+    from urllib.parse import urlparse
+else:
+    from urlparse import urlparse
 
 
 class InfluxDBClientError(Exception):
@@ -101,6 +108,70 @@ class InfluxDBClient(object):
             'Content-type': 'application/json',
             'Accept': 'text/plain'}
 
+    @staticmethod
+    def from_DSN(dsn, **kwargs):
+        """
+        Returns an instance of InfluxDBClient from the provided data source
+        name. Supported schemes are "influxdb", "https+influxdb",
+        "udp+influxdb". Parameters for the InfluxDBClient constructor may be
+        also be passed to this function.
+
+        Examples:
+            >>> cli = InfluxDBClient.from_DSN('influxdb://username:password@
+            localhost:8086/databasename', timeout=5)
+            >>> type(cli)
+            <class 'influxdb.client.InfluxDBClient'>
+            >>> cli = InfluxDBClient.from_DSN('udp+influxdb://username:pass@\
+            localhost:8086/databasename', timeout=5, udp_port=159)
+            >>> print('{0._baseurl} - {0.use_udp} {0.udp_port}'.format(cli))
+            http://localhost:8086 - True 159
+
+        :param dsn: data source name
+        :type dsn: string
+        :param **kwargs: additional parameters for InfluxDBClient.
+        :type **kwargs: dict
+        :note: parameters provided in **kwargs may override dsn parameters.
+        :note: when using "udp+influxdb" the specified port (if any) will be
+        used for the TCP connection; specify the udp port with the additional
+        udp_port parameter (cf. examples).
+        :raise ValueError: if the provided DSN has any unexpected value.
+        """
+        dsn = dsn.lower()
+
+        init_args = {}
+        conn_params = urlparse(dsn)
+        scheme_info = conn_params.scheme.split('+')
+        if len(scheme_info) == 1:
+            scheme = scheme_info[0]
+            modifier = None
+        else:
+            modifier, scheme = scheme_info
+
+        if scheme != 'influxdb':
+            raise ValueError('Unknown scheme "{}".'.format(scheme))
+        if modifier:
+            if modifier == 'udp':
+                init_args['use_udp'] = True
+            elif modifier == 'https':
+                init_args['ssl'] = True
+            else:
+                raise ValueError('Unknown modifier "{}".'.format(modifier))
+
+        if conn_params.hostname:
+            init_args['host'] = conn_params.hostname
+        if conn_params.port:
+            init_args['port'] = conn_params.port
+        if conn_params.username:
+            init_args['username'] = conn_params.username
+        if conn_params.password:
+            init_args['password'] = conn_params.password
+        if conn_params.path and len(conn_params.path) > 1:
+            init_args['database'] = conn_params.path[1:]
+
+        init_args.update(kwargs)
+
+        return InfluxDBClient(**init_args)
+
     #
     # By default we keep the "order" of the json responses:
     # more clearly: any dict contained in the json response will have
@@ -109,7 +180,7 @@ class InfluxDBClient(object):
     # if one doesn't care in that, then it can simply change its client
     # instance 'keep_json_response_order' attribute value (to a falsy one).
     # This will then eventually help for performance considerations.
-    _keep_json_response_order = True
+    _keep_json_response_order = False
     # NB: For "group by" query type :
     # This setting is actually necessary in order to have a consistent and
     # reproducible rsp format if you "group by" on more than 1 tag.
@@ -121,33 +192,6 @@ class InfluxDBClient(object):
     @keep_json_response_order.setter
     def keep_json_response_order(self, new_value):
         self._keep_json_response_order = new_value
-
-    @staticmethod
-    def format_query_response(response):
-        """Returns a list of items from a query response"""
-        series = {}
-        if 'results' in response:
-            for result in response['results']:
-                if 'series' in result:
-                    for row in result['series']:
-                        items = []
-                        if 'name' in row:
-                            name = row['name']
-                            tags = row.get('tags', None)
-                            if tags:
-                                name = (row['name'], tuple(tags.items()))
-                            assert name not in series
-                            series[name] = items
-                        else:
-                            series = items  # Special case for system queries.
-                        if 'columns' in row and 'values' in row:
-                            columns = row['columns']
-                            for value in row['values']:
-                                item = {}
-                                for cur_col, field in enumerate(value):
-                                    item[columns[cur_col]] = field
-                                items.append(item)
-        return series
 
     def switch_database(self, database):
         """
@@ -234,15 +278,16 @@ class InfluxDBClient(object):
               query,
               params={},
               expected_response_code=200,
-              database=None,
-              raw=False):
+              database=None):
         """
         Query data
 
         :param params: Additional parameters to be passed to requests.
         :param database: Database to query, default to None.
         :param expected_response_code: Expected response code. Defaults to 200.
-        :param raw: Wether or not to return the raw influxdb response.
+
+        :rtype : ResultSet
+
         """
 
         params['q'] = query
@@ -261,14 +306,14 @@ class InfluxDBClient(object):
             json_kw.update(object_pairs_hook=OrderedDict)
         data = response.json(**json_kw)
 
-        return (data if raw
-                else self.format_query_response(data))
+        return ResultSet(data)
 
     def write_points(self,
                      points,
                      time_precision=None,
                      database=None,
                      retention_policy=None,
+                     tags=None,
                      ):
         """
         Write to multiple time series names.
@@ -284,13 +329,15 @@ class InfluxDBClient(object):
         return self._write_points(points=points,
                                   time_precision=time_precision,
                                   database=database,
-                                  retention_policy=retention_policy)
+                                  retention_policy=retention_policy,
+                                  tags=tags)
 
     def _write_points(self,
                       points,
                       time_precision,
                       database,
-                      retention_policy):
+                      retention_policy,
+                      tags):
         if time_precision not in ['n', 'u', 'ms', 's', 'm', 'h', None]:
             raise ValueError(
                 "Invalid time precision is given. "
@@ -311,6 +358,9 @@ class InfluxDBClient(object):
         if retention_policy:
             data['retentionPolicy'] = retention_policy
 
+        if tags:
+            data['tags'] = tags
+
         data['database'] = database or self._database
 
         if self.use_udp:
@@ -327,8 +377,7 @@ class InfluxDBClient(object):
         """
         Get the list of databases
         """
-        rsp = self.query("SHOW DATABASES")
-        return [db['name'] for db in rsp['databases']]
+        return list(self.query("SHOW DATABASES")['databases'])
 
     def create_database(self, dbname):
         """
@@ -368,21 +417,31 @@ class InfluxDBClient(object):
         """
         Get the list of retention policies
         """
-        return self.query(
+        rsp = self.query(
             "SHOW RETENTION POLICIES %s" % (database or self._database)
         )
+        return list(rsp['results'])
 
     def get_list_series(self, database=None):
         """
         Get the list of series
         """
-        return self.query("SHOW SERIES", database=database)
+        rsp = self.query("SHOW SERIES", database=database)
+        series = []
+        for serie in rsp.items():
+            series.append(
+                {
+                    "name": serie[0][0],
+                    "tags": list(serie[1])
+                }
+            )
+        return series
 
     def get_list_users(self):
         """
         Get the list of users
         """
-        return self.query("SHOW USERS")
+        return list(self.query("SHOW USERS"))
 
     def delete_series(self, name, database=None):
         database = database or self._database
